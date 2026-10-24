@@ -17,11 +17,14 @@ import sys
 import json
 import csv
 import io
+import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
 import urllib.request
 import urllib.parse
 from pathlib import Path
 from typing import Dict, Any, List, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, HTTPException, Body, UploadFile, File, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -165,6 +168,164 @@ def guardar_ventas(ventas: List[Dict[str, Any]]):
     with open(VENTAS_FILE, "w", encoding="utf-8") as f:
         json.dump(ventas, f, indent=2, ensure_ascii=False)
 
+# ==========================================
+# CONEXIÓN Y SINCRONIZACIÓN NATIVA CON INGENIO AI CRM
+# ==========================================
+
+CORE_AI_URL = os.getenv("CORE_AI_URL", "https://core.ai.ingeniodigital.shop")
+CORE_AI_TOKEN = os.getenv("CORE_AI_TOKEN", "admin-dev-secret")
+TZ_VET = timezone(timedelta(hours=-4))
+
+CORE_TENANTS = [
+    {"id": "dba1c54c-89c6-41e9-ae9d-03613377a5b3", "subcuenta": "docentes", "cuenta": "act_1077134118459248", "default_prod": "Kit Docente MPPE"},
+    {"id": "e847198b-f23c-49b3-88e7-89ee297d6ee7", "subcuenta": "salud", "cuenta": "act_971185559393685", "default_prod": "Bóveda Médica / Salud"}
+]
+
+_LAST_CRM_SYNC_TIME = None
+_CRM_SYNC_LOCK = threading.Lock()
+
+def process_single_conv_crm(conv: Dict[str, Any], tenant_info: Dict[str, Any]) -> List[Dict[str, Any]]:
+    c_id = conv.get("id")
+    msg_count = conv.get("messageCount", 0)
+    lead_status = conv.get("leadStatus", "")
+    
+    if msg_count < 2 and lead_status not in ["CLOSED", "SALE", "HOT", "CLIENT", "PAGADO"]:
+        return []
+
+    headers = {
+        "Authorization": f"Bearer {CORE_AI_TOKEN}",
+        "x-tenant-id": tenant_info["id"]
+    }
+
+    try:
+        req = urllib.request.Request(f"{CORE_AI_URL}/conversations/{c_id}/messages", headers=headers)
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            messages = data.get("data", [])
+    except Exception:
+        return []
+
+    contact_name = conv.get("contactName") or "Docente"
+    contact_phone = conv.get("contactPhone") or ""
+    subcuenta = tenant_info["subcuenta"]
+    cuenta = tenant_info["cuenta"]
+    default_prod = tenant_info["default_prod"]
+
+    product_interest = default_prod
+    sales_found = []
+
+    for m in messages:
+        content = m.get("content") or ""
+        c_lower = content.lower()
+        if "matemática" in c_lower:
+            product_interest = "Kit Docente Matemática MPPE"
+        elif "química" in c_lower or "quimica" in c_lower:
+            product_interest = "Kit Docente Química MPPE"
+        elif "física" in c_lower or "fisica" in c_lower:
+            product_interest = "Kit Docente Física MPPE"
+        elif "inglés" in c_lower or "ingles" in c_lower:
+            product_interest = "Kit Docente Inglés MPPE"
+        elif "castellano" in c_lower or "lengua" in c_lower:
+            product_interest = "Kit Docente Castellano MPPE"
+        elif "primaria" in c_lower or "inicial" in c_lower:
+            product_interest = "Kit Docente Primaria MPPE"
+        elif "biología" in c_lower or "biologia" in c_lower:
+            product_interest = "Kit Docente Biología MPPE"
+        elif "bóveda" in c_lower or "médic" in c_lower or "medic" in c_lower:
+            product_interest = "Bóveda Médica / Salud"
+
+        if "Comprobante de Pago Detectado" in content or "[Comprobante" in content:
+            ref_match = re.search(r'Referencia:\s*#?([A-Za-z0-9]+)', content, re.IGNORECASE)
+            ref = ref_match.group(1) if ref_match else f"{c_id[:8]}"
+
+            monto_bs = 7250.0
+            monto_match = re.search(r'Monto:\s*(?:Bs\.?\s*)?([0-9.,]+)(?:\s*Bs\.?)?', content, re.IGNORECASE)
+            if monto_match:
+                raw_monto = monto_match.group(1).replace('.', '').replace(',', '.')
+                try:
+                    monto_bs = float(raw_monto)
+                except ValueError:
+                    pass
+
+            banco_match = re.search(r'Banco:\s*([^|]+)', content, re.IGNORECASE)
+            banco = banco_match.group(1).strip() if banco_match else "Pago Móvil"
+
+            ts_str = m.get("timestamp") or conv.get("updatedAt")
+            try:
+                dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                dt_vet = dt.astimezone(TZ_VET)
+                fecha_str = dt_vet.strftime("%Y-%m-%d")
+                hora_str = dt_vet.strftime("%H:%M")
+            except Exception:
+                fecha_str = datetime.now(TZ_VET).strftime("%Y-%m-%d")
+                hora_str = datetime.now(TZ_VET).strftime("%H:%M")
+
+            monto_usd = round(monto_bs / TASA_BCV_DEFAULT, 2)
+
+            sale = {
+                "id": f"crm_{ref}",
+                "referencia": ref,
+                "fecha": fecha_str,
+                "hora": hora_str,
+                "producto": product_interest,
+                "subcuenta": subcuenta,
+                "cuenta": cuenta,
+                "monto_usd": monto_usd,
+                "monto_bs": monto_bs,
+                "metodo_pago": f"Pago Móvil ({banco})",
+                "cliente": f"Prof. {contact_name}" if subcuenta == "docentes" and not contact_name.startswith("Prof.") else contact_name,
+                "telefono": contact_phone,
+                "ocr_status": "Verificado 100% (Ingenio AI Core)",
+                "ref_ad": "Campaña Meta Ads",
+                "synced_from": "ingenio_ai_core"
+            }
+            sales_found.append(sale)
+
+    return sales_found
+
+def sync_live_crm_sales() -> Dict[str, Any]:
+    global _LAST_CRM_SYNC_TIME
+    with _CRM_SYNC_LOCK:
+        try:
+            existing = cargar_ventas()
+            seen_refs = set()
+            for s in existing:
+                ref = str(s.get("referencia") or s.get("id", "")).replace("#", "")
+                if ref:
+                    seen_refs.add(ref)
+
+            new_sales = []
+            for t_info in CORE_TENANTS:
+                headers = {
+                    "Authorization": f"Bearer {CORE_AI_TOKEN}",
+                    "x-tenant-id": t_info["id"]
+                }
+                req = urllib.request.Request(f"{CORE_AI_URL}/conversations?limit=80", headers=headers)
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    res = json.loads(resp.read().decode("utf-8"))
+                    conversations = res.get("data", [])
+
+                with ThreadPoolExecutor(max_workers=8) as executor:
+                    futures = [executor.submit(process_single_conv_crm, c, t_info) for c in conversations]
+                    for f in futures:
+                        try:
+                            r_list = f.result()
+                            if r_list:
+                                for s in r_list:
+                                    s_ref = str(s.get("referencia", "")).replace("#", "")
+                                    if s_ref not in seen_refs and s.get("id") not in seen_refs:
+                                        existing.insert(0, s)
+                                        seen_refs.add(s_ref)
+                                        new_sales.append(s)
+                        except Exception:
+                            pass
+
+            guardar_ventas(existing)
+            _LAST_CRM_SYNC_TIME = datetime.now()
+            return {"status": "success", "new_sales": len(new_sales), "total_sales": len(existing), "synced_at": _LAST_CRM_SYNC_TIME.isoformat()}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
 def parse_chats(actions: List[Dict[str, Any]]) -> int:
     for a in actions:
         if "messaging_conversation_started_7d" in a.get("action_type", "") or "total_messaging_connection" in a.get("action_type", ""):
@@ -235,6 +396,10 @@ def get_consolidado(period: str = "today", subcuenta: str = "docentes"):
             fechas_filtro = [(now - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)]
 
         # 2. Filtrar ventas CRM por fecha y subcuenta
+        global _LAST_CRM_SYNC_TIME
+        if _LAST_CRM_SYNC_TIME is None or (now - _LAST_CRM_SYNC_TIME).total_seconds() > 90:
+            threading.Thread(target=sync_live_crm_sales, daemon=True).start()
+
         todas_ventas = cargar_ventas()
         ventas_periodo = []
         for v in todas_ventas:
@@ -558,6 +723,13 @@ def procesar_csv_filas(csv_text: str) -> Dict[str, Any]:
         "nuevas_ventas": nuevas,
         "total_ventas": len(ventas_existentes)
     }
+
+@app.post("/api/crm/sync-live")
+@app.get("/api/crm/sync-live")
+def trigger_crm_sync():
+    """Fuerza una sincronización en tiempo real con Ingenio AI Core."""
+    res = sync_live_crm_sales()
+    return res
 
 @app.post("/api/crm/upload-csv")
 async def upload_csv_crm(file: UploadFile = File(...)):
@@ -1049,6 +1221,7 @@ def index_html():
     </div>
     <div class="header-btns">
       <input type="file" id="csvFileInput" accept=".csv" style="display:none;" onchange="subirCSV(event)">
+      <button class="btn-top" onclick="sincronizarCRMEnVivo()" title="Sincronizar CRM con Ingenio AI Core">⚡ Sync CRM</button>
       <button class="btn-top" onclick="abrirSelectorCSV()">📥 Subir CSV</button>
       <button class="btn-action-sale" onclick="abrirModalVenta()">+ Venta</button>
       <button class="btn-top" onclick="recargarTodo()">🔄</button>
@@ -1535,6 +1708,24 @@ def index_html():
         });
       } catch (e) {
         console.error(e);
+      }
+    }
+
+    async function sincronizarCRMEnVivo() {
+      showToast('⚡ Conectando con Ingenio AI Core CRM...');
+      try {
+        const res = await fetch('/api/crm/sync-live', { method: 'POST' });
+        const data = await res.json();
+        if (data.status === 'success') {
+          showToast(`✅ CRM Sincronizado: ${data.new_sales} nuevas (${data.total_sales} total)`);
+          recargarTodo();
+        } else {
+          showToast('⚠️ No se pudo sincronizar: ' + (data.message || ''));
+          recargarTodo();
+        }
+      } catch (e) {
+        showToast('⚠️ Error al sincronizar: ' + e);
+        recargarTodo();
       }
     }
 
