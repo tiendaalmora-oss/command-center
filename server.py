@@ -484,64 +484,107 @@ def get_jerarquia(period: str = "today", subcuenta: str = "docentes"):
 # IMPORTADOR AUTOMÁTICO DE CRM Y WEBHOOKS
 # ==========================================
 
+def procesar_csv_filas(csv_text: str) -> Dict[str, Any]:
+    ventas_existentes = cargar_ventas()
+    ids_existentes = {str(v.get("id")) for v in ventas_existentes}
+    nuevas = 0
+    
+    reader = csv.DictReader(io.StringIO(csv_text))
+    for row in reader:
+        norm = {(k.strip().lower() if k else ""): (v.strip() if v else "") for k, v in row.items()}
+        
+        # Fecha
+        raw_date = norm.get("fecha") or norm.get("date") or norm.get("created_at") or datetime.now().strftime("%Y-%m-%d")
+        fecha = raw_date
+        if "/" in raw_date:
+            pts = raw_date.split("/")
+            if len(pts) == 3:
+                if len(pts[2]) == 4: # DD/MM/YYYY
+                    fecha = f"{pts[2]}-{pts[1].zfill(2)}-{pts[0].zfill(2)}"
+                elif len(pts[0]) == 4: # YYYY/MM/DD
+                    fecha = f"{pts[0]}-{pts[1].zfill(2)}-{pts[2].zfill(2)}"
+        elif "t" in raw_date.lower():
+            fecha = raw_date.lower().split("t")[0]
+            
+        hora = norm.get("hora") or norm.get("time") or "12:00"
+        producto = norm.get("producto") or norm.get("product") or norm.get("item") or "Kit Docente"
+        
+        # Montos
+        monto_bs_str = norm.get("monto_bs") or norm.get("monto") or norm.get("total_bs") or norm.get("total") or "7250"
+        try:
+            clean_bs = str(monto_bs_str).replace("Bs", "").replace("bs", "").replace("$", "").replace(" ", "").replace(".", "").replace(",", ".")
+            monto_bs = float(clean_bs) if clean_bs else 7250.0
+        except Exception:
+            monto_bs = 7250.0
+
+        monto_usd_str = norm.get("monto_usd") or norm.get("usd") or norm.get("dolares")
+        try:
+            if monto_usd_str:
+                monto_usd = float(str(monto_usd_str).replace("$", "").replace(" ", "").replace(",", "."))
+            else:
+                monto_usd = round(monto_bs / TASA_BCV_DEFAULT, 2)
+        except Exception:
+            monto_usd = round(monto_bs / TASA_BCV_DEFAULT, 2)
+
+        metodo = norm.get("metodo") or norm.get("metodo_pago") or norm.get("payment_method") or "Pago Móvil"
+        cliente = norm.get("cliente") or norm.get("nombre") or norm.get("customer") or norm.get("name") or "Cliente CRM"
+        ref_ad = norm.get("ref_ad") or norm.get("ad") or ""
+        
+        # Clasificar subcuenta
+        sub = "salud" if any(k in producto.lower() for k in ["farmacia", "medico", "enfermeria", "sacs"]) else "docentes"
+        
+        venta_id = norm.get("id") or f"crm_{abs(hash(f'{fecha}_{hora}_{cliente}_{monto_bs}'))}"
+        if str(venta_id) not in ids_existentes:
+            ventas_existentes.insert(0, {
+                "id": str(venta_id),
+                "fecha": fecha,
+                "hora": hora,
+                "producto": producto,
+                "subcuenta": sub,
+                "cuenta": "act_1077134118459248" if sub == "docentes" else "act_971185559393685",
+                "monto_bs": monto_bs,
+                "monto_usd": round(monto_usd, 2),
+                "metodo_pago": metodo,
+                "cliente": cliente,
+                "ocr_status": "Verificado 100%",
+                "ref_ad": ref_ad
+            })
+            ids_existentes.add(str(venta_id))
+            nuevas += 1
+
+    guardar_ventas(ventas_existentes)
+    return {
+        "status": "success",
+        "nuevas_ventas": nuevas,
+        "total_ventas": len(ventas_existentes)
+    }
+
+@app.post("/api/crm/upload-csv")
+async def upload_csv_crm(file: UploadFile = File(...)):
+    """Recibe y procesa un archivo CSV exportado desde crm.ingeniodigital.shop/sales."""
+    try:
+        content = await file.read()
+        text = content.decode("utf-8-sig", errors="ignore")
+        res = procesar_csv_filas(text)
+        res["archivo"] = file.filename
+        return res
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 @app.post("/api/crm/scan-downloads")
 def scan_downloads_csv():
-    """
-    Escanea automáticamente la carpeta Downloads en busca del CSV más reciente
-    exportado desde crm.ingeniodigital.shop/sales y actualiza la base de datos.
-    """
+    """Escanea la carpeta Downloads si existe localmente."""
     try:
         csv_files = list(DOWNLOADS_DIR.glob("*.csv")) + list(DOWNLOADS_DIR.glob("*sales*.csv"))
         if not csv_files:
-            return {"status": "not_found", "message": "No se encontraron archivos CSV recientes en Descargas"}
+            return {"status": "not_found", "message": "No se encontraron archivos CSV en el servidor."}
         
-        # Obtener el más reciente
         csv_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
         latest_csv = csv_files[0]
-        
-        ventas_existentes = cargar_ventas()
-        ids_existentes = {v.get("id") for v in ventas_existentes}
-        
-        nuevas = 0
         with open(latest_csv, "r", encoding="utf-8-sig", errors="ignore") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                # Mapear encabezados comunes de CRM
-                fecha = row.get("Fecha") or row.get("fecha") or datetime.now().strftime("%Y-%m-%d")
-                producto = row.get("Producto") or row.get("producto") or "Kit Docente"
-                monto_bs = float(row.get("Monto_Bs") or row.get("Monto") or row.get("Total") or 7250.0)
-                monto_usd = float(row.get("Monto_USD") or (monto_bs / TASA_BCV_DEFAULT))
-                metodo = row.get("Metodo") or row.get("Metodo_Pago") or "Pago Móvil"
-                cliente = row.get("Cliente") or row.get("Nombre") or "Cliente CRM"
-                
-                # Clasificar subcuenta según producto
-                sub = "salud" if any(k in producto.lower() for k in ["farmacia", "medico", "enfermeria", "sacs"]) else "docentes"
-                
-                venta_id = f"crm_{abs(hash(f'{fecha}_{cliente}_{monto_bs}'))}"
-                if venta_id not in ids_existentes:
-                    ventas_existentes.insert(0, {
-                        "id": venta_id,
-                        "fecha": fecha,
-                        "hora": row.get("Hora", "12:00"),
-                        "producto": producto,
-                        "subcuenta": sub,
-                        "cuenta": "act_1077134118459248" if sub == "docentes" else "act_971185559393685",
-                        "monto_bs": monto_bs,
-                        "monto_usd": round(monto_usd, 2),
-                        "metodo_pago": metodo,
-                        "cliente": cliente,
-                        "ocr_status": "Verificado 100%"
-                    })
-                    ids_existentes.add(venta_id)
-                    nuevas += 1
-
-        guardar_ventas(ventas_existentes)
-        return {
-            "status": "success",
-            "archivo": latest_csv.name,
-            "nuevas_ventas": nuevas,
-            "total_ventas": len(ventas_existentes)
-        }
+            res = procesar_csv_filas(f.read())
+            res["archivo"] = latest_csv.name
+            return res
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -1005,7 +1048,8 @@ def index_html():
       <span class="badge-live">● EN VIVO</span>
     </div>
     <div class="header-btns">
-      <button class="btn-top" onclick="escanearCSVDescargas()">📥 Sync CRM</button>
+      <input type="file" id="csvFileInput" accept=".csv" style="display:none;" onchange="subirCSV(event)">
+      <button class="btn-top" onclick="abrirSelectorCSV()">📥 Subir CSV</button>
       <button class="btn-action-sale" onclick="abrirModalVenta()">+ Venta</button>
       <button class="btn-top" onclick="recargarTodo()">🔄</button>
       <button class="btn-top" onclick="cerrarSesion()" title="Cerrar Sesión">🔒</button>
@@ -1108,7 +1152,7 @@ def index_html():
     <div id="viewVentas" style="display:none;">
       <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
         <span style="font-size:0.85rem; font-weight:800; color:#38bdf8;">Ventas Confirmadas en CRM</span>
-        <button class="btn-top" onclick="escanearCSVDescargas()">📥 Importar CSV</button>
+        <button class="btn-top" onclick="abrirSelectorCSV()">📥 Subir CSV CRM</button>
       </div>
       <div id="ventasContainer">Cargando ventas...</div>
     </div>
@@ -1494,20 +1538,39 @@ def index_html():
       }
     }
 
-    async function escanearCSVDescargas() {
-      showToast('Buscando CSV en Descargas...');
+    function abrirSelectorCSV() {
+      const input = document.getElementById('csvFileInput');
+      if (input) input.click();
+    }
+
+    async function subirCSV(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+
+      const formData = new FormData();
+      formData.append('file', file);
+
+      showToast('⏳ Importando ventas del CSV...');
       try {
-        const res = await fetch('/api/crm/scan-downloads', { method: 'POST' });
+        const res = await fetch('/api/crm/upload-csv', {
+          method: 'POST',
+          body: formData
+        });
         const data = await res.json();
         if (data.status === 'success') {
-          showToast(`¡${data.nuevas_ventas} ventas importadas desde ${data.archivo}!`);
+          showToast(`¡${data.nuevas_ventas} ventas nuevas procesadas (${data.total_ventas} en total)!`);
           recargarTodo();
         } else {
-          alert('Aviso: ' + data.message + '\\n\\nTip: Descarga el CSV desde el botón \"Exportar CSV\" en tu CRM crm.ingeniodigital.shop/sales y luego pulsa este botón.');
+          alert('Error al importar CSV: ' + (data.message || 'Error desconocido'));
         }
       } catch (e) {
-        alert('Error al escanear: ' + e);
+        alert('Error al subir archivo: ' + e);
       }
+      event.target.value = '';
+    }
+
+    async function escanearCSVDescargas() {
+      abrirSelectorCSV();
     }
 
     async function eliminarVenta(id) {
