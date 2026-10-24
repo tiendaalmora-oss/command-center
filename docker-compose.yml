@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  command-center:
+    build: .
+    container_name: command_center_panel
+    restart: always
+    environment:
+      - META_ACCESS_TOKEN=EAAWIZB99bQ7gBSzuqXlyB9ChYbcsARYSlK4GHkDXbKqwWqEIfyTZCRsnjVpAmfvf6L1FKOdRokvXv2ZA1JvBZAxvhw30BE4sn1QVNYY3AHZA5DpU0tURG6BjtUqXcMnLlBdIyFuC5CquL5RTmyYoZCMp5gU3fcmFhQ3MG4iFYZCUGQjjC2a7xTYTCDAbjevowZDZD
+      - PANEL_PASSWORD=ingenio2026
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "8080:8080"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.command-center.rule=Host(`panel.ingeniodigital.shop`)"
+      - "traefik.http.routers.command-center.entrypoints=websecure"
+      - "traefik.http.routers.command-center.tls.certresolver=letsencrypt"
+      - "traefik.http.services.command-center.loadbalancer.server.port=8080"

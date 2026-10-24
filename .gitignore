@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+*.log
+cloudflared.exe
+data/tunnel*
+data/test*
+ENLACE_CELULAR.txt
+iniciar_panel.vbs
+iniciar_servicio_completo.py
