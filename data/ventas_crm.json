@@ -1,5 +1,22 @@
 [
   {
+    "id": "crm_007789532907",
+    "referencia": "007789532907",
+    "fecha": "2026-10-24",
+    "hora": "21:21",
+    "producto": "MEGA KIT DOCENTE DE FÍSICA · BACHILLERATO VENEZUELA",
+    "subcuenta": "docentes",
+    "cuenta": "act_1077134118459248",
+    "monto_usd": 7.0,
+    "monto_bs": 7250.0,
+    "metodo_pago": "Pago Móvil (Banco de Venezuela (PagomóvilBDV))",
+    "cliente": "Prof. GAEL🩷 🪐",
+    "telefono": "25529956733175",
+    "ocr_status": "Verificado 100% (Ingenio AI Core)",
+    "ref_ad": "Campaña Meta Ads",
+    "synced_from": "ingenio_ai_core"
+  },
+  {
     "id": "crm_062976248953",
     "referencia": "062976248953",
     "fecha": "2026-10-24",

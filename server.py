@@ -292,7 +292,7 @@ def sync_live_crm_sales() -> Dict[str, Any]:
                     print(f"Error al sincronizar CRM ({t_info['subcuenta']}): {ex}")
 
             guardar_ventas(existing)
-            _LAST_CRM_SYNC_TIME = datetime.now()
+            _LAST_CRM_SYNC_TIME = get_venezuela_now()
             return {
                 "status": "success",
                 "new_sales": len(new_sales),
@@ -301,6 +301,25 @@ def sync_live_crm_sales() -> Dict[str, Any]:
             }
         except Exception as e:
             return {"status": "error", "message": str(e)}
+
+def background_crm_worker():
+    """Worker permanente en segundo plano que sondea el CRM cada 30 segundos automáticamente."""
+    import time
+    while True:
+        try:
+            time.sleep(30)
+            sync_live_crm_sales()
+        except Exception:
+            pass
+
+@app.on_event("startup")
+def startup_event():
+    # Sincronizar inmediatamente al encender el contenedor y arrancar worker continuo
+    try:
+        sync_live_crm_sales()
+    except Exception:
+        pass
+    threading.Thread(target=background_crm_worker, daemon=True).start()
 
 def parse_chats(actions: List[Dict[str, Any]]) -> int:
     for a in actions:
@@ -371,10 +390,10 @@ def get_consolidado(period: str = "today", subcuenta: str = "docentes"):
         else: # last_7d
             fechas_filtro = [(now - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)]
 
-        # 2. Filtrar ventas CRM por fecha y subcuenta
+        # 2. Sincronizar CRM si pasaron más de 30 segundos
         global _LAST_CRM_SYNC_TIME
-        if _LAST_CRM_SYNC_TIME is None or (now - _LAST_CRM_SYNC_TIME).total_seconds() > 90:
-            threading.Thread(target=sync_live_crm_sales, daemon=True).start()
+        if _LAST_CRM_SYNC_TIME is None or (now - _LAST_CRM_SYNC_TIME).total_seconds() > 30:
+            sync_live_crm_sales()
 
         todas_ventas = cargar_ventas()
         ventas_periodo = []
@@ -1195,7 +1214,7 @@ def index_html():
   <header>
     <div class="brand">
       ⚡ COMMAND CENTER V2.5
-      <span class="badge-live">● EN VIVO</span>
+      <span class="badge-live" id="badgeLive">● AUTO-SYNC <span id="syncSecs">30s</span></span>
     </div>
     <div class="header-btns">
       <input type="file" id="csvFileInput" accept=".csv" style="display:none;" onchange="subirCSV(event)">
@@ -1935,7 +1954,19 @@ def index_html():
       }
     }
 
+    let segundosAutoSync = 30;
+    setInterval(() => {
+      segundosAutoSync--;
+      const el = document.getElementById('syncSecs');
+      if (el) el.innerText = `${segundosAutoSync}s`;
+      if (segundosAutoSync <= 0) {
+        segundosAutoSync = 30;
+        recargarTodo();
+      }
+    }, 1000);
+
     function recargarTodo() {
+      segundosAutoSync = 30;
       cargarConsolidado();
       cargarJerarquia();
       cargarVentas();
