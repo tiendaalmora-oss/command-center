@@ -93,6 +93,13 @@ TRACKED_ACCOUNTS = [
 # Tasa Oficial BCV por defecto (Bs por 1 USD)
 TASA_BCV_DEFAULT = 1035.0  # Basado en ticket promedio de 7.250 Bs por $7 USD
 
+# Zona Horaria Oficial del Negocio (Caracas, Venezuela: UTC-4)
+TZ_VENEZUELA = timezone(timedelta(hours=-4))
+
+def get_venezuela_now() -> datetime:
+    """Retorna la fecha y hora actual en la zona horaria de Venezuela (UTC-4), garantizando que no haya desfasaje UTC en el VPS."""
+    return datetime.now(TZ_VENEZUELA)
+
 def get_meta_token():
     env_token = os.getenv("META_ACCESS_TOKEN")
     if env_token:
@@ -138,22 +145,25 @@ def call_meta_api(endpoint: str, params: Optional[Dict[str, Any]] = None, method
         raise RuntimeError(f"Meta API Error ({e.code}): {msg}")
 
 def get_period_params(period: str) -> Dict[str, str]:
-    now = datetime.now()
+    now = get_venezuela_now()
     today_str = now.strftime("%Y-%m-%d")
     
     if period == "today":
-        return {"date_preset": "today"}
+        return {"time_range": json.dumps({"since": today_str, "until": today_str})}
     elif period == "yesterday":
-        return {"date_preset": "yesterday"}
+        yest_str = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+        return {"time_range": json.dumps({"since": yest_str, "until": yest_str})}
     elif period == "last_2d":
         since_str = (now - timedelta(days=1)).strftime("%Y-%m-%d")
         return {"time_range": json.dumps({"since": since_str, "until": today_str})}
     elif period == "last_7d":
-        return {"date_preset": "last_7d"}
+        since_str = (now - timedelta(days=6)).strftime("%Y-%m-%d")
+        return {"time_range": json.dumps({"since": since_str, "until": today_str})}
     elif period == "last_30d":
-        return {"date_preset": "last_30d"}
+        since_str = (now - timedelta(days=29)).strftime("%Y-%m-%d")
+        return {"time_range": json.dumps({"since": since_str, "until": today_str})}
     else:
-        return {"date_preset": "today"}
+        return {"time_range": json.dumps({"since": today_str, "until": today_str})}
 
 def cargar_ventas() -> List[Dict[str, Any]]:
     if VENTAS_FILE.exists():
@@ -380,8 +390,8 @@ def get_consolidado(period: str = "today", subcuenta: str = "docentes"):
     """
     try:
         sub_info = SUBCUENTAS.get(subcuenta, SUBCUENTAS["docentes"])
+        now = get_venezuela_now()
         p_params = get_period_params(period)
-        now = datetime.now()
         
         # 1. Rango de fechas
         if period == "today":
@@ -770,11 +780,12 @@ def crm_webhook(payload: Dict[str, Any] = Body(...)):
         
         monto_bs = float(payload.get("monto_bs", 7250.0))
         monto_usd = float(payload.get("monto_usd", round(monto_bs / TASA_BCV_DEFAULT, 2)))
+        now_vet = get_venezuela_now()
 
         nueva_venta = {
-            "id": f"wh_{int(datetime.now().timestamp())}",
-            "fecha": payload.get("fecha", datetime.now().strftime("%Y-%m-%d")),
-            "hora": datetime.now().strftime("%H:%M"),
+            "id": f"wh_{int(now_vet.timestamp())}",
+            "fecha": payload.get("fecha", now_vet.strftime("%Y-%m-%d")),
+            "hora": now_vet.strftime("%H:%M"),
             "producto": producto,
             "subcuenta": sub,
             "cuenta": "act_1077134118459248" if sub == "docentes" else "act_971185559393685",
@@ -803,11 +814,12 @@ def agregar_venta_manual(payload: Dict[str, Any] = Body(...)):
         
         monto_bs = float(payload.get("monto_bs", 7250.0))
         monto_usd = float(payload.get("monto_usd", round(monto_bs / TASA_BCV_DEFAULT, 2)))
+        now_vet = get_venezuela_now()
 
         nueva_venta = {
-            "id": f"v_{int(datetime.now().timestamp())}",
-            "fecha": payload.get("fecha", datetime.now().strftime("%Y-%m-%d")),
-            "hora": datetime.now().strftime("%H:%M"),
+            "id": f"v_{int(now_vet.timestamp())}",
+            "fecha": payload.get("fecha", now_vet.strftime("%Y-%m-%d")),
+            "hora": now_vet.strftime("%H:%M"),
             "producto": producto,
             "subcuenta": sub,
             "cuenta": "act_1077134118459248" if sub == "docentes" else "act_971185559393685",
@@ -828,7 +840,7 @@ def agregar_venta_manual(payload: Dict[str, Any] = Body(...)):
 def listar_ventas(period: str = "today", subcuenta: str = "docentes"):
     todas = cargar_ventas()
     sub_info = SUBCUENTAS.get(subcuenta, SUBCUENTAS["docentes"])
-    now = datetime.now()
+    now = get_venezuela_now()
     if period == "today":
         fechas = [now.strftime("%Y-%m-%d")]
     elif period == "yesterday":

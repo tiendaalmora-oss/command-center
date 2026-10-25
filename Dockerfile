@@ -5,6 +5,7 @@ WORKDIR /app
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PORT=8080
+ENV TZ="America/Caracas"
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
